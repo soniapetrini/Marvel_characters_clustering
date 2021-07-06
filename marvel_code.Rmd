@@ -1,0 +1,722 @@
+---
+title: "Marvel characters clustering"
+author: "Sonia Petrini"
+date: "6/21/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plyr)
+library(dplyr)
+library(StatMatch)
+library(parallel)
+library(gridExtra)
+library(ggplot2)
+
+marvel <- read.csv("marvelcharactersdata.csv")
+```
+
+___
+
+# Data preparation
+
+```{r}
+summarytools::dfSummary(marvel,graph.col = F,valid.col = F)
+```
+
+```{r}
+marvel$GSM[marvel$name == "Xavin (Earth-616)"] = "Pansexual Characters"
+```
+
+replace empty GSM with heterosexual and change other occurencies names
+
+```{r}
+marvel$GSM <- case_when(
+  marvel$GSM == "" ~ "heterosexual",
+  marvel$GSM == "Bisexual Characters" ~ "bisexual",
+  marvel$GSM == "Genderfluid Characters" ~ "genderfluid",
+  marvel$GSM == "Homosexual Characters" ~ "homosexual",
+  marvel$GSM == "Pansexual Characters" ~ "pansexual",
+  marvel$GSM == "Transgender Characters" ~ "transgender",
+  marvel$GSM == "Transvestites" ~ "transvestites"
+)
+```
+
+replace all empty strings with nan and keep only charachters with all information available 
+
+```{r}
+marvel[marvel == ""] <- NA
+marvel <- na.omit(marvel)
+marvel$page_id <-  NULL
+marvel$urlslug <-  NULL
+```
+
+keep only month of FIRST.APPEARANCE and divide by season
+
+```{r}
+library(stringr)
+marvel$FIRST.APPEARANCE <- str_sub(marvel$FIRST.APPEARANCE, end=-4)
+
+marvel$FIRST.APPEARANCE <- case_when(
+  marvel$FIRST.APPEARANCE %in% c("Jun", "Jul", "Aug") ~ "summer",
+  marvel$FIRST.APPEARANCE %in% c("Sep", "Oct", "Nov") ~ "autumn",
+  marvel$FIRST.APPEARANCE %in% c("Dec","Jan","Feb") ~ "winter",
+  marvel$FIRST.APPEARANCE %in% c("Mar", "Apr", "May") ~ "spring")
+```
+
+rename variables values
+
+```{r}
+library(stringr)
+marvel <- marvel %>%
+      mutate_at("name", str_replace, '\\(Earth-616\\)', '') %>%
+      mutate_at("ID", str_replace, 'Identity', '') %>%
+      mutate_at("ALIGN", str_replace, 'Characters', '') %>%
+      mutate_at("EYE", str_replace, 'Eyes', '') %>%
+      mutate_at("HAIR", str_replace, 'Hair', '') %>%
+      mutate_at("SEX", str_replace, 'Characters', '') %>%
+      mutate_at("ALIVE", str_replace, 'Characters', '')
+```
+
+set variables to right type
+
+```{r}
+marvel[,c(2,3,4,5,6,7,8,10)] <- lapply(marvel[,c(2,3,4,5,6,7,8,10)], as.factor)
+```
+
+set the names as the indices
+
+```{r}
+rownames(marvel) <- marvel$name
+marvel$name <- NULL
+```
+
+sample  
+
+```{r}
+'%!in%' <- function(x,y)!('%in%'(x,y))
+
+marvel <- marvel %>% filter(ALIVE == "Living ")
+sample <- marvel %>% filter(GSM == "heterosexual") %>% slice_head(n=30)
+marvel_nohet <- marvel %>% filter(GSM %!in% c("heterosexual","genderfluid"))
+marvel <- rbind(marvel_nohet,sample)
+marvel$ALIVE <- NULL
+rm(sample,marvel_nohet)
+```
+
+summary statistic of numerical variables
+
+```{r}
+library(xtable)
+sum_num <- summary(Filter(is.numeric,marvel))
+print(xtable(as.table(sum_num), type = "latex"), file = "sum_num.tex")
+```
+
+
+```{r}
+ summarytools::dfSummary(Filter(is.factor ,marvel)[,c(1,2,5,6,7)],graph.col = F,valid.col = F)
+```
+
+
+scale numerical variables
+
+```{r}
+s_marvel <- marvel %>% mutate_at(c("APPEARANCES", "Year"), ~(scale(.) %>% as.vector))
+```
+
+
+```{r}
+ggplot(marvel, aes(x=Year)) + 
+  geom_histogram(color="black", fill="red",binwidth = 7) +
+  scale_x_continuous(breaks=c(1941,1951,1961,1971,1981,1991,2001,2011))
+ggsave("year_hist.eps",width = 7, height = 3)
+```
+
+
+
+
+___
+
+# CLUSTER ANALYSIS
+
+## Hierarchical clustering
+
+```{r}
+future::plan(multicore=3)
+gower_dist <- gower.dist(s_marvel)
+#save(gower_dist, file = "gower_dist_marvel.rda")
+```
+
+open the distance matrix in rda
+
+```{r}
+#load(file = "gower_dist_marvel.rda")
+```
+
+### WARD
+
+```{r}
+hc_ward <- hclust(as.dist(gower_dist),method="ward.D2")
+
+setEPS()
+#postscript("ward.eps",width = 7, height = 5)
+plot(hc_ward, labels = rownames(s_marvel),hang=-5, cex = 0.6)
+abline(h=1.5, col="red")
+rect.hclust(hc_ward,k=3,border=c("orange","green","blue"))
+#dev.off()
+```
+
+
+### 3 clusters
+clusters numerosity
+
+```{r}
+groups <- cutree(hc_ward, k=3)
+s_marvel$clusters <- as.factor(groups)
+table(s_marvel$clusters)
+```
+
+
+goodness of clustering
+
+The *Dunn Index* is the ratio of the smallest distance between observations not in the same cluster to the largest intra-cluster distance. The Dunn Index has a value between zero and infinity, and should be maximized.
+
+```{r}
+library(clValid)
+dunn(distance = as.dist(gower_dist), groups, Data = s_marvel)
+```
+
+
+```{r}
+library(factoextra) 
+
+#setEPS()
+#postscript("silh.eps",width = 7, height = 4)
+viz<-eclust(s_marvel[,-10],"hclust", hc_method = "ward.D2", k=3)
+fviz_silhouette(viz) 
+#dev.off()
+
+sil<-viz$silinfo$widths 
+neg_sil<-which(sil[,'sil_width']<0) 
+sil[neg_sil,]
+```
+
+### 4 clusters
+
+clusters numerosity
+
+```{r}
+groups <- cutree(hc_ward, k=4)
+s_marvel$clusters <- as.factor(groups)
+table(s_marvel$clusters)
+```
+
+
+goodness of clustering
+
+The *Dunn Index* is the ratio of the smallest distance between observations not in the same cluster to the largest intra-cluster distance. The Dunn Index has a value between zero and infinity, and should be maximized.
+
+```{r}
+library(clValid)
+dunn(distance = as.dist(gower_dist), groups, Data = s_marvel)
+```
+
+
+```{r}
+library(factoextra) 
+
+#setEPS()
+#postscript("silh.eps",width = 7, height = 4)
+viz<-eclust(s_marvel[,-10],"hclust", hc_method = "ward.D2", k=4)
+fviz_silhouette(viz) 
+#dev.off()
+
+sil<-viz$silinfo$widths 
+neg_sil<-which(sil[,'sil_width']<0) 
+sil[neg_sil,]
+```
+
+
+### COMPLETE
+
+```{r}
+hc_complete <- hclust(as.dist(gower_dist),method="complete")
+
+setEPS()
+#postscript("complete.eps",width = 7, height = 5)
+plot(hc_complete, labels = rownames(s_marvel),hang=-5, cex = 0.6)
+abline(h=0.8, col="red")
+rect.hclust(hc_complete,k=4,border=c("orange","green","blue"))
+#dev.off()
+```
+
+### 4 clusters
+clusters numerosity
+
+```{r}
+groups <- cutree(hc_complete, k=4)
+s_marvel$clusters <- as.factor(groups)
+table(s_marvel$clusters)
+```
+
+
+goodness of clustering
+
+The *Dunn Index* is the ratio of the smallest distance between observations not in the same cluster to the largest intra-cluster distance. The Dunn Index has a value between zero and infinity, and should be maximized.
+
+```{r}
+dunn(distance = as.dist(gower_dist), groups, Data = s_marvel)
+```
+
+
+```{r}
+#setEPS()
+#postscript("silh.eps",width = 7, height = 4)
+viz<-eclust(s_marvel[,-10],"hclust", hc_method = "complete", k=4)
+fviz_silhouette(viz) 
+#dev.off()
+
+sil<-viz$silinfo$widths 
+neg_sil<-which(sil[,'sil_width']<0) 
+sil[neg_sil,]
+```
+
+### 3 clusters
+
+clusters numerosity
+
+```{r}
+groups <- cutree(hc_complete, k=3)
+s_marvel$clusters <- as.factor(groups)
+table(s_marvel$clusters)
+```
+
+
+goodness of clustering
+
+The *Dunn Index* is the ratio of the smallest distance between observations not in the same cluster to the largest intra-cluster distance. The Dunn Index has a value between zero and infinity, and should be maximized.
+
+```{r}
+dunn(distance = as.dist(gower_dist), groups, Data = s_marvel)
+```
+
+
+```{r}
+#setEPS()
+#postscript("silh.eps",width = 7, height = 4)
+viz<-eclust(s_marvel[,-10],"hclust", hc_method = "complete", k=3)
+fviz_silhouette(viz) 
+#dev.off()
+
+sil<-viz$silinfo$widths 
+neg_sil<-which(sil[,'sil_width']<0) 
+sil[neg_sil,]
+```
+
+
+### AVERAGE
+
+```{r}
+hc_average <- hclust(as.dist(gower_dist),method="average")
+plot(hc_average, labels = rownames(s_marvel),hang=-5, cex = 0.6)
+abline(h=0.6, col="red")
+rect.hclust(hc_average,k=3,border=c("orange","green","blue"))
+```
+The clusters obtained with average linkage look too unbalanced.
+
+
+
+```{r}
+library(ape)
+colors = c("green","blue","orange")
+plot(as.phylo(hc_complete), type = "fan", tip.color = colors[s_marvel$clusters],
+     label.offset = 0, cex = 0.7)
+```
+
+
+```{r}
+library(cluster)
+
+tmp.pr <- cmdscale(gower_dist)
+plot(tmp.pr, col=groups)
+
+G <- unique(groups)
+for(g in G){
+  idx <- which(groups==g)
+  if(length(idx)>2){
+    xy <- ellipsoidhull(tmp.pr[idx,])
+    lines(predict(xy), col=g,lty=2,lwd=2)
+  }
+}
+text(tmp.pr, as.character(rownames(s_marvel)),adj=0, cex = 0.8)
+```
+
+___
+
+# CATEGORICAL PCA
+
+## perform PCA
+
+```{r}
+library(Gifi)
+ordvec <- c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE,FALSE,TRUE)
+
+future::plan(multicore=3)
+pca <- princals(s_marvel[,-10], ndim= 4, ordinal =  ordvec)  ## ordinal PCA
+summary(pca)
+```
+
+
+### Screeplot
+
+Choose the number of components to retain: 4, explaining 81.7 % of the original variance
+
+```{r}
+#setEPS()
+#postscript("scree.eps",width = 7, height = 4)
+plot(pca, "screeplot")
+abline(h=1.0,col="orange",lty=2,lwd=3)
+#dev.off()
+```
+
+
+### Components' meaning
+
+* **Component 1**: this component is strongly related to GSM, APPEARANCES, and Year.
+  
+```{r}
+boxplots <- ggplot(marvel, aes(x=reorder(GSM,Year), y=Year, fill=GSM)) +
+    theme(legend.position="none") +
+    geom_boxplot(varwidth = TRUE) + 
+  theme(legend.title = element_text(size = 10), 
+        legend.text = element_text(size = 8),
+        axis.title = element_text(size = 8)) +
+  labs(x = "Sexual orientation")
+
+dots <- ggplot(marvel, aes(APPEARANCES, Year))+ 
+  geom_point(aes(colour = GSM,sixe=3)) + 
+  theme(legend.title = element_text(size = 8), 
+        legend.text = element_text(size = 8),
+        axis.title = element_text(size = 8)) +
+  labs(x = "Number of appearances")
+
+#setEPS()
+#postscript("comp1.eps",width = 7, height = 5)
+grid.arrange(boxplots,dots,ncol=1)
+#dev.off()
+```
+
+* **Component 2**: This component is mainly related with ID, HAIR, SEX.
+  
+
+```{r}
+o <- ggplot(marvel, aes(y=HAIR, x=SEX, colour=HAIR)) +
+  geom_count(alpha=0.7) +
+  facet_grid(. ~ ID) +
+  labs(x = "Type of identity",
+       y = "Hair color") +
+  scale_size_continuous(range = c(3, 17))+ 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = " ") #+
+  #scale_color_manual(values =c("#ffcccc","#3d3936","#ede72d",
+                              #"#0066ff","#996600","#cccccc",
+                              #"#9966ff","#cc3300","#e67e39",
+                              #"#e69b39","#ffffff"))
+
+ggplotly(o)
+```
+
+* **Component 3**: This component is mainly related with the season of first appearance, the eye color, but also with identity and hair color.
+  
+```{r}
+ggplot(data=marvel, aes(x=FIRST.APPEARANCE, y=EYE, fill=EYE)) +
+  geom_bar(stat="identity") +
+  facet_grid(. ~ ID) #+
+  #scale_fill_manual(values = c("#38312B","#2496ED","#965C29","#56B85B","grey","#BD9844","#9E3421","#ffccff","white","#EBD642")) + 
+  theme(legend.title = element_text(size = 8), 
+        legend.text = element_text(size = 8),
+        axis.title = element_text(size = 9)) +
+  labs(x = "Season of appearance",
+       y = "Eye color")
+```
+
+* **Component 4**: This component is the one explaining ALLIGN and EYE.
+
+```{r}
+p <- ggplot(marvel, aes(y=EYE, x=ALIGN, colour=ALIGN)) +
+  geom_count(alpha=0.4) +
+  scale_size_continuous(range = c(1, 23)) + 
+  theme(legend.title = element_text(size = 8), 
+        legend.text = element_text(size = 9),
+        axis.title = element_text(size = 9))
+ggplotly(p)
+```
+
+
+```{r}
+#setEPS()
+#postscript("load.eps",width = 7, height = 4)
+plot(pca, "loadplot")
+#dev.off()
+```
+
+
+## hierarchical clustering visualization
+
+```{r}
+marvel_pca <- data.frame(pca$objectscores)
+
+marvel_pca$clusters <- as.factor(groups)
+
+#setEPS()
+#postscript("hier_2d.eps",width = 7, height = 4)
+ggplot(marvel_pca, aes(x=D1, y=D2, color=clusters)) + 
+  geom_point() + 
+  geom_text(label=rownames(marvel_pca)) +
+  scale_colour_brewer(
+  type = "div",
+  palette = "Set2",
+  direction = 1,
+  aesthetics = "colour")
+#dev.off()
+```
+
+```{r}
+library(threejs)
+COLS = RColorBrewer::brewer.pal(3,"Paired")
+scatterplot3js(as.matrix(marvel_pca[,c(1,2,3)]),col=COLS[marvel_pca$clusters],size=0.3)
+```
+
+
+
+___
+
+# K-MEANS WITH PCA
+
+First let's try k-means with 3 clusters, as found in hierarchical methods
+
+```{r}
+marvel_kmeans <- marvel_pca %>% select(-clusters)
+c_k_means <- kmeans(marvel_kmeans, 3) # k = 3
+```
+
+compare with hierarchical clustering groups
+
+```{r}
+table(c_k_means$cluster, s_marvel$clusters)
+```
+
+*wss plot* for choosing optimal number of clusters
+
+```{r}
+wssplot <- function(data, nc=15, seed=1234){
+  wss <- (nrow(data)-1)*sum(apply(data,2,var))
+  for (i in 2:nc){
+    set.seed(seed)
+    wss[i] <- sum(kmeans(data, centers=i)$withinss)}
+  plot(1:nc, wss, type="b", xlab="Number of Clusters",
+       ylab="Within groups sum of squares")
+  abline(h=46, col = "orange",lwd=3, lty=2)}
+
+wssplot(marvel_kmeans, nc=6) 
+```
+
+Basing on the elbow criteria, we try 3 and 4 clusters
+
+```{r}
+marvel_kmeans$clusters <- as.factor(c_k_means$cluster)
+ggplot(marvel_kmeans, aes(x=D1, y=D2, color=clusters)) + 
+  geom_point() + 
+  geom_text(label=rownames(marvel_kmeans))
+```
+
+```{r}
+library(threejs)
+
+COLS = RColorBrewer::brewer.pal(4,"Set2")
+scatterplot3js(as.matrix(marvel_kmeans[,c(1,2,3)]),col=COLS[marvel_kmeans$clusters],size=0.3)
+
+```
+
+
+The clusters are now more separated and well defined
+
+
+```{r}
+dunn(clusters = as.integer(marvel_kmeans$clusters), Data = marvel_kmeans)
+```
+
+```{r}
+kmeans_viz<-eclust(marvel_kmeans[,-5],"kmeans", k=3) 
+fviz_silhouette(kmeans_viz) 
+kmeans_sil<-kmeans_viz$silinfo$widths 
+neg_sils<-which(kmeans_sil[,'sil_width']<0) 
+kmeans_sil[neg_sils,]
+```
+### 4 clusters with kmeans
+
+```{r}
+c_k_means <- kmeans(marvel_kmeans, 4)
+```
+
+```{r}
+marvel_kmeans$clusters <- as.factor(c_k_means$cluster)
+dunn(clusters = as.integer(marvel_kmeans$clusters), Data = marvel_kmeans)
+```
+
+```{r}
+kmeans_viz<-eclust(marvel_kmeans[,-5],"kmeans", k=4) 
+fviz_silhouette(kmeans_viz) 
+kmeans_sil<-kmeans_viz$silinfo$widths 
+neg_sils<-which(kmeans_sil[,'sil_width']<0) 
+kmeans_sil[neg_sils,]
+```
+
+___
+
+## CLUSTERS EXPLORATION (complete, 3 clusters)
+
+```{r}
+groups <- cutree(hc_complete, k=3)
+marvel$clusters <- as.factor(groups)
+id <- marvel %>% 
+  group_by(clusters, ID) %>% 
+  dplyr::summarise(count = n()) %>% 
+  dplyr::mutate(perc = count/sum(count)) %>%
+ggplot(aes(x = clusters, y = perc*100, fill = ID)) +
+  geom_bar(stat="identity", width = 0.7) +
+  labs(x = "Clusters", y = "percentage", fill = "Identity") +
+  theme_minimal(base_size = 14) + 
+  theme(legend.title = element_text(size = 10), 
+               legend.text = element_text(size = 10),
+        axis.title = element_text(size = 10)) +
+  scale_fill_manual(values=c("#E266E8","#50C7C7","#800B30"))
+
+align <- marvel %>% 
+  group_by(clusters, ALIGN) %>% 
+  dplyr::summarise(count = n()) %>% 
+  dplyr::mutate(perc = count/sum(count)) %>%
+ggplot(aes(x = clusters, y = perc*100, fill = ALIGN)) +
+  geom_bar(stat="identity", width = 0.7) +
+  labs(x = "Clusters", y = "percentage", fill = "Alignment") +
+  theme_minimal(base_size = 14) + 
+  theme(legend.title = element_text(size = 10), 
+               legend.text = element_text(size = 10),
+        axis.title = element_text(size = 10)) +
+  scale_fill_manual(values=c("#E80049","#56E854","#0FFAFA"))
+
+
+#setEPS()
+#postscript("ID_ALIGN.eps",width = 7, height = 3)
+grid.arrange(id,align, ncol=2)
+#dev.off()
+```
+
+```{r}
+eye <- marvel %>% 
+  group_by(clusters, EYE) %>% 
+  dplyr::summarise(count = n()) %>% 
+  dplyr::mutate(perc = count/sum(count)) %>%
+ggplot(aes(x = clusters, y = perc*100, fill = EYE)) +
+  geom_bar(stat="identity", width = 0.7) +
+  labs(x = "Clusters", y = "percentage", fill = "Eye color") +
+  theme_minimal(base_size = 14) + 
+  theme(legend.title = element_text(size = 10), 
+               legend.text = element_text(size = 10),
+        axis.title = element_text(size = 10))
+
+hair <- marvel %>% 
+  group_by(clusters, HAIR) %>% 
+  dplyr::summarise(count = n()) %>% 
+  dplyr::mutate(perc = count/sum(count)) %>%
+ggplot(aes(x = clusters, y = perc*100, fill = HAIR)) +
+  geom_bar(stat="identity", width = 0.7) +
+  labs(x = "Clusters", y = "percentage", fill = "Hair color") +
+  theme_minimal(base_size = 14) + 
+  theme(legend.title = element_text(size = 10), 
+        legend.text = element_text(size = 8),
+        axis.title = element_text(size = 10)) #+
+  #scale_fill_manual(values =c("#ffcccc","#3d3936","#ede72d",
+  #                            "#0066ff","#996600","#cccccc",
+  #                            "#9966ff","#cc3300","#e67e39",
+  #                            "#e69b39","#ffffff"))
+#
+#setEPS()
+#postscript("EYE_HAIR.eps",width = 7, height = 3.9)
+grid.arrange(eye,hair,ncol=2)
+#dev.off()
+```
+
+```{r}
+sex <- marvel %>% 
+  group_by(clusters, SEX) %>% 
+  dplyr::summarise(count = n()) %>% 
+  dplyr::mutate(perc = count/sum(count)) %>%
+ggplot(aes(x = clusters, y = perc*100, fill = SEX)) +
+  geom_bar(stat="identity", width = 0.7) +
+  labs(x = "Clusters", y = "percentage", fill = "Sex") +
+  theme_minimal(base_size = 14) + 
+  theme(legend.title = element_text(size = 10), 
+               legend.text = element_text(size = 10),
+        axis.title = element_text(size = 10)) +
+  scale_fill_manual(values =c("#ff9999","#ccccff","#00ccff"))
+
+gsm <- marvel %>% 
+  group_by(clusters, GSM) %>% 
+  dplyr::summarise(count = n()) %>% 
+  dplyr::mutate(perc = count/sum(count)) %>%
+ggplot(aes(x = clusters, y = perc*100, fill = GSM)) +
+  geom_bar(stat="identity", width = 0.7) +
+  labs(x = "Clusters", y = "percentage", fill = "Sexual orientation") +
+  theme_minimal(base_size = 14) + 
+  theme(legend.title = element_text(size = 10), 
+        legend.text = element_text(size = 10),
+        axis.title = element_text(size = 10)) +
+  scale_fill_manual(values =c("pink","grey","lightblue","yellow","violet"))
+
+#setEPS()
+#postscript("SEX_GSM.eps",width = 7, height = 3)
+grid.arrange(sex,gsm,ncol=2)
+#dev.off()
+```
+
+
+```{r}
+mu_year <- ddply(marvel, "clusters", summarise, grp.mean=mean(Year))
+
+app <- ggplot(marvel, aes(APPEARANCES, clusters, fill = clusters)) +
+  geom_violin(trim = FALSE)
+
+year <- ggplot(marvel, aes(x=Year, fill=clusters)) +
+  geom_density() +
+  geom_vline(data=mu_year, aes(xintercept=grp.mean, color=clusters),
+             linetype="dashed") +
+  labs(x = "Year of appearance")
+
+first_app <- marvel %>% 
+  group_by(clusters, FIRST.APPEARANCE) %>% 
+  dplyr::summarise(count = n()) %>% 
+  dplyr::mutate(perc = count/sum(count)) %>%
+ggplot(aes(x = clusters, y = perc*100, fill = FIRST.APPEARANCE)) +
+  geom_bar(stat="identity", width = 0.7) +
+  labs(x = "Clusters", y = "percentage", fill = "First appearance") +
+  theme_minimal(base_size = 14) + 
+  theme(legend.title = element_text(size = 10), 
+               legend.text = element_text(size = 10),
+        axis.title = element_text(size = 10)) +
+  scale_fill_manual(values=c("#ff9933","#99ff66","#0099ff","#99ffff"))
+
+#setEPS()
+#postscript("LAST.eps",width = 7, height = 3)
+grid.arrange(first_app, arrangeGrob(app,year, ncol=1), ncol=2)
+#dev.off()
+```
+
+
+
+
+
+
+
+
